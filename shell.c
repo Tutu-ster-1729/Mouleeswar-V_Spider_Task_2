@@ -10,7 +10,7 @@
 #define MAX_INPUT_SIZE 1024
 #define MAX_ARGS 64
 #define DELIMITERS " \t\r\n"
-#define PORT 8080
+#define DEFAULT_PORT 4443
 #define LOOPBACK_IP "127.0.0.1"
 #define CHUNK_SIZE 4096							// 4KB chunk size for optimized file transfer
 
@@ -22,7 +22,7 @@ struct packed_header {			                // 4 + 64 + 4 = 72 bytes
 } __attribute__((packed));
 
 // NITTALK UTILITY MODULES
-void listener(const char *output_filename) {
+void listener(const char *output_filename, int port) {
     int server_fd, client_socket;
     struct sockaddr_in address;
     int opt = 1;
@@ -40,7 +40,7 @@ void listener(const char *output_filename) {
 
     address.sin_family = AF_INET;		        // IPv4
     address.sin_addr.s_addr = INADDR_ANY;	    // Bind to any local IP interface (WiFi, Ethernet, etc)
-    address.sin_port = htons(PORT);		        // Host-to-Network Short (endianness conversion)
+    address.sin_port = htons(port);		        // Host-to-Network Short (endianness conversion)
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("[nittalk] Bind failed");
@@ -48,7 +48,7 @@ void listener(const char *output_filename) {
     }
     listen(server_fd, 3);			            // Queue upto 3 connections before rejecting them
 
-    printf("[nittalk] Standing by for  radio connection on port %d...\n", PORT);
+    printf("[nittalk] Standing by for  radio connection on port %d...\n", port);
     client_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
     printf("[nittalk] Link established.\n");
 
@@ -97,14 +97,18 @@ void listener(const char *output_filename) {
         total_bytes_received += bytes_read;
     }
 
-    printf("[nittalk] File transfer complete. Saved %u bytes.\n", total_bytes_received);
+	if (total_bytes_received == total_payload_bytes) {
+		printf("[nittalk] File transfer complete. Saved %u bytes.\n", total_bytes_received);
+	} else {
+		fprintf(stderr, "[nittalk ERROR] Transfer incomplete!. Received %u of %u bytes.\n", total_bytes_received, total_payload_bytes);
+	}
 
     fclose(dest_file);
     close(client_socket);
     close(server_fd);
 }
 
-void sender(const char *source_filename) {
+void sender(const char *source_filename, const char *target_ip, int port) {
     int sock = 0;
     struct sockaddr_in serv_addr;
     struct packed_header header;
@@ -129,11 +133,11 @@ void sender(const char *source_filename) {
     }
 
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(PORT);
+    serv_addr.sin_port = htons(port);
     // Convert IPv4 address from text to binary
-    inet_pton(AF_INET, LOOPBACK_IP, &serv_addr.sin_addr);
+    inet_pton(AF_INET, target_ip, &serv_addr.sin_addr);
 
-    printf("[nittalk] Connecting to radio link address %s:%d...\n", LOOPBACK_IP, PORT);
+    printf("[nittalk] Connecting to radio link address %s:%d...\n", target_ip, port);
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         perror("[nittalk] Connection refused");
         fclose(src_file);
@@ -144,10 +148,16 @@ void sender(const char *source_filename) {
     // Populating and Transmit Header metadata
     memcpy(header.magic, "NIT\x00", 4);
     strncpy(header.filename, source_filename, 64);
+    header.filename[63] = '\0';						// Ensure null termination
     // Safeguard integer size using Host-to-Network conversion before sending
     header.payload_size = htonl(file_size);
 
-    send(sock, &header, sizeof(struct packed_header), 0);
+    if (send(sock, &header, sizeof(struct packed_header), 0) < 0) {
+        perror("[nittalk] Failed to transmit authentication envelope");
+        fclose(src_file);
+        close(sock);
+        return;
+    }
 
     // Stream file payload data chunks
     char chunk_buffer[CHUNK_SIZE];
@@ -203,10 +213,18 @@ int main(){
 			continue;							// Skip the forking and other logic if cd 
 		} else if (strcmp(args[0], "nittalk") == 0) {
 			if (args[1] == NULL || args[2] == NULL){
-				fprintf(stderr, "Usage: nittalk -l <output_file> OR nittalk -s <source_file>\n");
-			} else if (strcmp(args[1], "-l") == 0) listener(args[2]);
-			else if (strcmp(args[1], "-s") == 0) sender(args[2]);
-			else fprintf(stderr, "[nittalk] Invalid runtime parameter format.\n");
+				fprintf(stderr, "Usage: nittalk -l <output_file> [port] OR nittalk -s <source_file> <target_ip> [port]\n");
+			} else if (strcmp(args[1], "-l") == 0) {
+				int port = (args[3] != NULL) ? atoi(args[3]) : DEFAULT_PORT; // Optional port argument
+				listener(args[2], port);
+			} else if (strcmp(args[1], "-s") == 0) {
+				if (args[3] == NULL) {
+					fprintf(stderr, "Usage: nittalk -s <source_file> <target_ip> [port]\n");
+				} else {
+					int port = (args[4] != NULL) ? atoi(args[4]) : DEFAULT_PORT; // Optional port argument
+					sender(args[2], args[3], port);
+				}
+			} else fprintf(stderr, "[nittalk] Invalid runtime parameter format.\n");
 			continue;							// Skip the forking and other logic if nittalk
 		}
 		
